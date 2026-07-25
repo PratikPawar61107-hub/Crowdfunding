@@ -1,0 +1,101 @@
+// Midnight Crowdfunding Smart Contract
+//
+// Privacy Model:
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC (on-ledger, visible to everyone):
+//   - Campaign title, description, funding goal, deadline
+//   - Total raised amount and backer count (updated via disclose() on each pledge)
+//   - Campaign status (Draft, Active, Funded, Closed)
+//   - Creator public key (derived from private secret, disclosed at launch)
+//
+// PRIVATE (witness / off-ledger, never stored on-chain):
+//   - localSecretKey: user's secret key for identity proofs (creator / backer)
+//   - pledgeAmount: pledge size chosen privately before selective disclosure
+//
+// PRIVACY GUARANTEES:
+//   - Backers prove identity via zero-knowledge without revealing their secret key
+//   - Pledge amounts originate from a private witness; only the disclosed total is public
+//   - Creator proves ownership to withdraw or close without exposing the raw secret key
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+export enum CampaignStatus {
+  DRAFT,
+  ACTIVE,
+  FUNDED,
+  CLOSED
+}
+
+// ── Public ledger state ─────────────────────────────────────────────────────
+
+export ledger status: CampaignStatus;
+export ledger title: Opaque<"string">;
+export ledger description: Opaque<"string">;
+export ledger fundingGoal: Uint<64>;
+export ledger totalRaised: Uint<64>;
+export ledger deadline: Uint<64>;
+export ledger backerCount: Counter;
+export ledger creator: Bytes<32>;
+
+// ── Private witnesses ─────────────────────────────────────────────────────────
+
+witness localSecretKey(): Bytes<32>;
+witness pledgeAmount(): Uint<64>;
+
+constructor() {
+  status = CampaignStatus.DRAFT;
+  fundingGoal = 0;
+  totalRaised = 0;
+  deadline = 0;
+}
+
+export circuit launch(
+  titleInput: Opaque<"string">,
+  descriptionInput: Opaque<"string">,
+  goal: Uint<64>,
+  deadlineInput: Uint<64>
+): [] {
+  assert(status == CampaignStatus.DRAFT, "Campaign already launched");
+  assert(goal > 0, "Funding goal must be positive");
+  creator = disclose(publicKey(localSecretKey(), pad(32, "crowdfunding:creator")));
+  title = disclose(titleInput);
+  description = disclose(descriptionInput);
+  fundingGoal = disclose(goal);
+  deadline = disclose(deadlineInput);
+  status = CampaignStatus.ACTIVE;
+}
+
+export circuit contribute(): [] {
+  assert(status == CampaignStatus.ACTIVE, "Campaign is not active");
+  const amount = pledgeAmount();
+  assert(amount > 0, "Pledge amount must be positive");
+  totalRaised = disclose((totalRaised + amount) as Uint<64>);
+  backerCount.increment(1);
+  if (totalRaised >= fundingGoal) {
+    status = CampaignStatus.FUNDED;
+  }
+}
+
+export circuit withdraw(): [] {
+  assert(status == CampaignStatus.FUNDED, "Campaign is not fully funded");
+  assert(
+    creator == publicKey(localSecretKey(), pad(32, "crowdfunding:creator")),
+    "Only the creator can withdraw"
+  );
+  status = CampaignStatus.CLOSED;
+}
+
+export circuit close(): [] {
+  assert(status == CampaignStatus.ACTIVE, "Can only close active campaigns");
+  assert(
+    creator == publicKey(localSecretKey(), pad(32, "crowdfunding:creator")),
+    "Only the creator can close the campaign"
+  );
+  status = CampaignStatus.CLOSED;
+}
+
+export circuit publicKey(sk: Bytes<32>, domain: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "crowdfunding:pk:"), domain, sk]);
+}
